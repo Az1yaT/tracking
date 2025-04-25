@@ -1,0 +1,2 @@
+/Users/az1yat/Documents/FlutterProjects/trackingApplication/tracking_application/android/app/.cxx/Debug/2o1r5h65/x86/CMakeFiles/edit_cache.dir
+/Users/az1yat/Documents/FlutterProjects/trackingApplication/tracking_application/android/app/.cxx/Debug/2o1r5h65/x86/CMakeFiles/rebuild_cache.dir
