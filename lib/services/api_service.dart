@@ -15,6 +15,19 @@ class ApiService {
     this.useMockData = true, // По умолчанию используем тестовые данные
   });
 
+  // Создадим локальное хранилище для моковых данных, чтобы изменения сохранялись между вызовами
+  List<Map<String, dynamic>> _mockOrders = [];
+  bool _mockOrdersInitialized = false;
+
+  // Метод для получения моковых заказов с сохранением изменений
+  List<Map<String, dynamic>> _getMockOrders() {
+    if (!_mockOrdersInitialized) {
+      _mockOrders = MockDataService.getMockOrders();
+      _mockOrdersInitialized = true;
+    }
+    return _mockOrders;
+  }
+
   // Метод для обновления заголовка авторизации
   void updateAuthHeader(String token) {
     headers['Authorization'] = 'Bearer $token';
@@ -25,17 +38,30 @@ class ApiService {
     if (useMockData) {
       await Future.delayed(const Duration(seconds: 1)); // Имитация задержки сети
       
-      // Возвращаем соответствующие тестовые данные в зависимости от запрашиваемого endpoint
+      // Обработка различных эндпоинтов
       if (endpoint == '/orders') {
-        return MockDataService.getMockOrders().map((e) => Order.fromJson(e)).toList();
-      } else if (endpoint == '/users?role=courier') {
+        return _getMockOrders().map((e) => Order.fromJson(e)).toList();
+      } 
+      else if (endpoint.startsWith('/orders/courier')) {
+        // Извлекаем id курьера из запроса
+        String courierId = endpoint.replaceFirst('/orders/courier/', '');
+        List<Map<String, dynamic>> orders = _getMockOrders().where(
+          (order) => order['courier_id'] == courierId
+        ).toList();
+        
+        return orders.map((e) => Order.fromJson(e)).toList();
+      }
+      else if (endpoint == '/users?role=courier' || endpoint == '/users/couriers') {
         return MockDataService.getMockCouriers();
-      } else if (endpoint == '/statistics') {
+      } 
+      else if (endpoint == '/statistics') {
         return MockDataService.getMockStatistics();
       }
       
+      // Если не нашли подходящий эндпоинт
       throw Exception('Неизвестный endpoint для моковых данных: $endpoint');
     } else {
+      // Реальный API-запрос
       final response = await http.get(Uri.parse('$baseUrl$endpoint'), headers: headers);
       
       if (response.statusCode == 200) {
@@ -81,14 +107,32 @@ class ApiService {
     if (useMockData) {
       await Future.delayed(const Duration(seconds: 1)); // Имитация задержки сети
       
-      // Имитация успешного ответа для обновления статуса заказа или назначения курьера
+      print('Вызов PATCH для $endpoint с данными: $data');
+      
+      // Обработка обновления статуса заказа
       if (endpoint.contains('/orders/') && endpoint.contains('/status')) {
-        return {'success': true, 'message': 'Статус заказа обновлен'};
-      } else if (endpoint.contains('/orders/') && endpoint.contains('/assign')) {
-        return {'success': true, 'message': 'Курьер назначен'};
+        // Получаем ID заказа из endpoint
+        String orderId = endpoint.split('/')[2]; // Формат: /orders/{id}/status
+        
+        // Находим и обновляем заказ в моковых данных
+        for (var i = 0; i < _mockOrders.length; i++) {
+          if (_mockOrders[i]['id'] == orderId) {
+            _mockOrders[i]['status'] = data['status'];
+            _mockOrders[i]['updated_at'] = DateTime.now().toIso8601String();
+            print('Обновлен статус заказа $orderId на: ${data['status']}');
+            return {'success': true};
+          }
+        }
+        throw Exception('Заказ с ID $orderId не найден');
+      } 
+      // Обработка назначения курьера 
+      else if (endpoint.contains('/orders/') && endpoint.contains('/assign')) {
+        String orderId = endpoint.split('/')[2]; // Формат: /orders/{id}/assign
+        _updateMockOrder(orderId, data['courierId']);
+        return {'success': true};
       }
       
-      throw Exception('Неизвестный endpoint для моковых данных: $endpoint');
+      throw Exception('Неизвестный endpoint для PATCH: $endpoint');
     } else {
       final response = await http.patch(
         Uri.parse('$baseUrl$endpoint'),
@@ -141,7 +185,7 @@ class ApiService {
     if (useMockData) {
       await Future.delayed(const Duration(seconds: 1)); // Имитация задержки сети
       
-      List<Map<String, dynamic>> orders = MockDataService.getMockOrders();
+      List<Map<String, dynamic>> orders = _getMockOrders();
       
       // Применяем фильтры
       if (orderId != null) {
@@ -191,6 +235,27 @@ class ApiService {
         return data.map((item) => Order.fromJson(item)).toList();
       } else {
         throw Exception('Ошибка поиска заказов: ${response.body}');
+      }
+    }
+  }
+
+  // Дополнительный метод для обновления мокового заказа
+  void _updateMockOrder(String orderId, String courierId) {
+    if (_mockOrdersInitialized) {
+      final orderIndex = _mockOrders.indexWhere((order) => order['id'] == orderId);
+      
+      if (orderIndex >= 0) {
+        final courierList = MockDataService.getMockCouriers();
+        final courier = courierList.firstWhere(
+          (c) => c['id'] == courierId,
+          orElse: () => {'username': 'Неизвестно'},
+        );
+        
+        _mockOrders[orderIndex]['courier_id'] = courierId;
+        _mockOrders[orderIndex]['courier_name'] = courier['username'];
+        _mockOrders[orderIndex]['updated_at'] = DateTime.now().toIso8601String();
+        
+        print('Мок-заказ обновлен: ${_mockOrders[orderIndex]}');
       }
     }
   }
@@ -295,7 +360,11 @@ class ApiService {
   Future<void> assignCourier(String orderId, String courierId) async {
     if (useMockData) {
       await Future.delayed(const Duration(seconds: 1)); // Имитация задержки сети
-      return;
+      
+      print('Мок-назначение курьера: $courierId на заказ: $orderId');
+      
+      // Обновляем моковые данные
+      _updateMockOrder(orderId, courierId);
     } else {
       final response = await http.patch(
         Uri.parse('$baseUrl/orders/$orderId/assign'),
@@ -328,6 +397,31 @@ class ApiService {
     } else {
       // Реальное скачивание файла...
       throw UnimplementedError('Скачивание файла в реальном API не реализовано');
+    }
+  }
+
+  // Добавьте этот метод для получения заказов курьера
+  Future<List<Order>> getCourierOrders(String courierId) async {
+    if (useMockData) {
+      await Future.delayed(const Duration(seconds: 1)); // Имитация задержки сети
+      
+      print('Получение заказов для курьера: $courierId');
+      
+      // Используем searchOrders с фильтром по курьеру
+      return searchOrders(courierId: courierId);
+    } else {
+      // Реальный API запрос
+      final response = await http.get(
+        Uri.parse('$baseUrl/orders/courier/$courierId'),
+        headers: headers,
+      );
+
+      if (response.statusCode == 200) {
+        List<dynamic> data = jsonDecode(response.body);
+        return data.map((item) => Order.fromJson(item)).toList();
+      } else {
+        throw Exception('Ошибка получения заказов курьера: ${response.body}');
+      }
     }
   }
 }

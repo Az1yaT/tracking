@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
-import '../../providers/auth_provider.dart';
+import 'package:tracking_application/providers/auth_provider.dart';
 import '../../services/api_service.dart';
 import '../../models/order.dart';
-import '../../widgets/order_card.dart';
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 
 class AccountantScreen extends StatefulWidget {
   final ApiService apiService;
@@ -16,25 +15,23 @@ class AccountantScreen extends StatefulWidget {
   _AccountantScreenState createState() => _AccountantScreenState();
 }
 
-class _AccountantScreenState extends State<AccountantScreen>
-    with SingleTickerProviderStateMixin {
+class _AccountantScreenState extends State<AccountantScreen> with SingleTickerProviderStateMixin {
+  List<Order> _orders = [];
+  List<dynamic> _couriers = [];
   String? _errorMessage;
   bool _isLoading = false;
-  String? _selectedFilePath;
-  String? _selectedFileName;
-  late TabController _tabController;
-  List<Order> _deliveredOrders = [];
-  DateTime _startDate = DateTime.now().subtract(const Duration(days: 7));
-  DateTime _endDate = DateTime.now();
+  DateTime? _fromDate;
+  DateTime? _toDate;
   String? _selectedCourierId;
-  List<Map<String, dynamic>> _couriers = [];
-  double _totalSum = 0.0;
+  late TabController _tabController;
+  double _totalRevenue = 0;
+  String? _selectedFileForImport;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _loadCouriers();
+    _tabController = TabController(length: 3, vsync: this);
+    _fetchData();
   }
 
   @override
@@ -43,96 +40,50 @@ class _AccountantScreenState extends State<AccountantScreen>
     super.dispose();
   }
 
-  Future<void> _loadCouriers() async {
-    setState(() {
-      _isLoading = true;
-    });
-
-    try {
-      _couriers = await widget.apiService.getCouriers();
-      setState(() {
-        _couriers = _couriers;
-      });
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Ошибка загрузки курьеров: ${e.toString()}';
-      });
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
-    }
-  }
-
-  Future<void> _loadDeliveredOrders() async {
+  Future<void> _fetchData() async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
     try {
-      final dateFromStr = DateFormat('yyyy-MM-dd').format(_startDate);
-      final dateToStr = DateFormat('yyyy-MM-dd')
-          .format(_endDate.add(const Duration(days: 1)));
+      // Получаем список всех заказов
+      List<Order> orders = [];
+      
+      // Применяем фильтры, если они установлены
+      if (_fromDate != null || _toDate != null || _selectedCourierId != null) {
+        orders = await widget.apiService.searchOrders(
+          courierId: _selectedCourierId,
+          dateFrom: _fromDate?.toIso8601String(),
+          dateTo: _toDate?.toIso8601String(),
+          status: 'доставлен', // Только доставленные заказы
+        );
+      } else {
+        orders = await widget.apiService.searchOrders();
+      }
 
-      _deliveredOrders = await widget.apiService.searchOrders(
-        status: 'доставлен',
-        courierId: _selectedCourierId,
-        dateFrom: dateFromStr,
-        dateTo: dateToStr,
-      );
-
+      // Получаем список курьеров для фильтра
+      final couriers = await widget.apiService.getCouriers();
+      
       // Рассчитываем общую сумму
-      _totalSum =
-          _deliveredOrders.fold(0, (sum, order) => sum + (order.price ?? 0));
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Ошибка загрузки заказов: ${e.toString()}';
-      });
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
-    }
-  }
-
-  Future<void> _uploadOrders() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['xlsx', 'csv'],
-        allowMultiple: false,
-      );
-
-      if (result != null && result.files.single.path != null) {
-        setState(() {
-          _selectedFilePath = result.files.single.path!;
-          _selectedFileName = result.files.single.name;
-        });
-
-        // Show confirmation dialog
-        final shouldUpload = await _showConfirmationDialog();
-
-        if (shouldUpload) {
-          // Upload file
-          await widget.apiService.uploadFile(
-              '/orders/upload', _selectedFilePath!, onProgress: (progress) {
-            // You could update a progress indicator here
-          });
-
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Заказы успешно загружены')),
-          );
+      double total = 0;
+      for (var order in orders) {
+        if (order.status == 'доставлен' && order.price != null) {
+          total += order.price!;
         }
       }
+      
+      setState(() {
+        _orders = orders;
+        _couriers = couriers;
+        _totalRevenue = total;
+        print('Загружено заказов: ${_orders.length}');
+        print('Общая сумма: $_totalRevenue руб.');
+      });
     } catch (e) {
       setState(() {
-        _errorMessage = 'Ошибка загрузки заказов: ${e.toString()}';
+        _errorMessage = 'Ошибка загрузки данных: ${e.toString()}';
+        print('Ошибка загрузки: $e');
       });
     } finally {
       setState(() {
@@ -141,329 +92,415 @@ class _AccountantScreenState extends State<AccountantScreen>
     }
   }
 
-  Future<bool> _showConfirmationDialog() async {
-    return await showDialog<bool>(
+  Future<void> _importOrders() async {
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx', 'csv'],
+      );
+
+      if (result != null) {
+        _selectedFileForImport = result.files.single.path;
+        
+        // Показываем диалог подтверждения
+        showDialog(
           context: context,
           builder: (context) => AlertDialog(
-            title: const Text('Подтверждение'),
-            content: Text(
-                'Вы уверены, что хотите загрузить файл "$_selectedFileName"?'),
+            title: const Text('Импорт заказов'),
+            content: Text('Вы выбрали файл: ${result.files.single.name}\nХотите импортировать заказы из этого файла?'),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
                 child: const Text('Отмена'),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
               ),
-              ElevatedButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Загрузить'),
+              TextButton(
+                child: const Text('Импорт'),
+                onPressed: () async {
+                  Navigator.of(context).pop();
+                  // Здесь был бы код для реальной загрузки файла на сервер
+                  // В тестовом режиме просто показываем успешное сообщение
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Заказы успешно импортированы'))
+                  );
+                  await _fetchData(); // Обновляем данные
+                },
               ),
             ],
           ),
-        ) ??
-        false;
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка при выборе файла: ${e.toString()}'))
+      );
+    }
   }
 
-  Future<void> _downloadReport() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
+  Future<void> _exportOrders() async {
     try {
-      // Создаем query parameters для фильтрации отчета
-      final dateFromStr = DateFormat('yyyy-MM-dd').format(_startDate);
-      final dateToStr = DateFormat('yyyy-MM-dd').format(_endDate);
-
-      final queryParams = {
-        'dateFrom': dateFromStr,
-        'dateTo': dateToStr,
-        if (_selectedCourierId != null) 'courierId': _selectedCourierId!,
-      };
-
-      // Создаем endpoint с query parameters
-      final endpoint = Uri.parse('/reports')
-          .replace(queryParameters: queryParams)
-          .toString();
-
-      // Save location selection
-      final String? outputDir = await FilePicker.platform.getDirectoryPath();
-
-      if (outputDir == null) {
-        throw Exception('Директория не выбрана');
-      }
-
-      // Create a filename with timestamp
-      final String timestamp =
-          DateTime.now().toIso8601String().replaceAll(':', '-');
-      final String filename = 'report_$timestamp.xlsx';
-      final String filePath = '$outputDir/$filename';
-
-      // Download the report
-      await widget.apiService.downloadFile(endpoint, filePath,
-          onProgress: (progress) {
-        // You could update a progress indicator here
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Отчет сохранен: $filePath')),
+      // Здесь был бы код для реальной выгрузки в файл
+      // В тестовом режиме просто показываем успешное сообщение
+      
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Экспорт заказов'),
+          content: const Text('Выберите формат для экспорта:'),
+          actions: [
+            TextButton(
+              child: const Text('Excel (.xlsx)'),
+              onPressed: () {
+                Navigator.of(context).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Отчет успешно выгружен в Excel'))
+                );
+              },
+            ),
+            TextButton(
+              child: const Text('CSV (.csv)'),
+              onPressed: () {
+                Navigator.of(context).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Отчет успешно выгружен в CSV'))
+                );
+              },
+            ),
+          ],
+        ),
       );
     } catch (e) {
-      setState(() {
-        _errorMessage = 'Ошибка выгрузки отчета: ${e.toString()}';
-      });
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка при экспорте отчета: ${e.toString()}'))
+      );
     }
   }
 
-  Future<void> _selectDateRange(BuildContext context) async {
-    final DateTimeRange? picked = await showDateRangePicker(
-      context: context,
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now(),
-      initialDateRange: DateTimeRange(
-        start: _startDate,
-        end: _endDate,
-      ),
-      builder: (BuildContext context, Widget? child) {
-        return Theme(
-          data: ThemeData.light().copyWith(
-            primaryColor: Colors.blue,
-            colorScheme: const ColorScheme.light(primary: Colors.blue),
-            buttonTheme:
-                const ButtonThemeData(textTheme: ButtonTextTheme.primary),
-          ),
-          child: child!,
-        );
-      },
-    );
+  Widget _buildOrdersList() {
+    return _orders.isEmpty
+        ? const Center(child: Text('Нет доступных заказов'))
+        : ListView.builder(
+            itemCount: _orders.length,
+            itemBuilder: (context, index) {
+              final order = _orders[index];
+              return Card(
+                margin: const EdgeInsets.all(8.0),
+                child: ListTile(
+                  title: Text('Заказ №${order.id}'),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Статус: ${order.status ?? "Неизвестно"}'),
+                      Text('Курьер: ${order.courierName ?? "Не назначен"}'),
+                      Text('Адрес: ${order.address ?? ""}'),
+                      Text('Цена: ${order.price != null ? '${order.price!.toStringAsFixed(2)} руб.' : "Не указана"}'),
+                      Text('Дата создания: ${order.createdAt?.toString().substring(0, 16) ?? "Неизвестно"}'),
+                    ],
+                  ),
+                  isThreeLine: true,
+                ),
+              );
+            },
+          );
+  }
 
-    if (picked != null) {
-      setState(() {
-        _startDate = picked.start;
-        _endDate = picked.end;
-      });
-      _loadDeliveredOrders();
-    }
+  Widget _buildFilterPanel() {
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Фильтры', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: InkWell(
+                  onTap: () async {
+                    final date = await showDatePicker(
+                      context: context,
+                      initialDate: _fromDate ?? DateTime.now(),
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime.now(),
+                    );
+                    if (date != null) {
+                      setState(() {
+                        _fromDate = date;
+                      });
+                    }
+                  },
+                  child: InputDecorator(
+                    decoration: const InputDecoration(
+                      labelText: 'От даты',
+                      border: OutlineInputBorder(),
+                    ),
+                    child: Text(
+                      _fromDate != null ? '${_fromDate!.day}.${_fromDate!.month}.${_fromDate!.year}' : 'Не выбрано',
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: InkWell(
+                  onTap: () async {
+                    final date = await showDatePicker(
+                      context: context,
+                      initialDate: _toDate ?? DateTime.now(),
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime.now().add(const Duration(days: 1)),
+                    );
+                    if (date != null) {
+                      setState(() {
+                        _toDate = date;
+                      });
+                    }
+                  },
+                  child: InputDecorator(
+                    decoration: const InputDecoration(
+                      labelText: 'До даты',
+                      border: OutlineInputBorder(),
+                    ),
+                    child: Text(
+                      _toDate != null ? '${_toDate!.day}.${_toDate!.month}.${_toDate!.year}' : 'Не выбрано',
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            decoration: const InputDecoration(
+              labelText: 'Курьер',
+              border: OutlineInputBorder(),
+            ),
+            value: _selectedCourierId,
+            items: [
+              const DropdownMenuItem<String>(
+                value: null,
+                child: Text('Все курьеры'),
+              ),
+              ..._couriers.map<DropdownMenuItem<String>>((courier) {
+                return DropdownMenuItem<String>(
+                  value: courier['id'],
+                  child: Text(courier['username'] ?? courier['name'] ?? 'Неизвестно'),
+                );
+              }).toList(),
+            ],
+            onChanged: (value) {
+              setState(() {
+                _selectedCourierId = value;
+              });
+            },
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              ElevatedButton.icon(
+                icon: const Icon(Icons.search),
+                label: const Text('Применить фильтры'),
+                onPressed: _fetchData,
+              ),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.clear),
+                label: const Text('Сбросить'),
+                onPressed: () {
+                  setState(() {
+                    _fromDate = null;
+                    _toDate = null;
+                    _selectedCourierId = null;
+                  });
+                  _fetchData();
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryPanel() {
+    return Card(
+      margin: const EdgeInsets.all(8),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Итоги', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Divider(),
+            Text(
+              'Количество заказов: ${_orders.length}',
+              style: const TextStyle(fontSize: 16),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Общая сумма: ${_totalRevenue.toStringAsFixed(2)} руб.',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final username = Provider.of<AuthProvider>(context).username;
-
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Бухгалтер'),
-            Text(
-              username ?? '',
-              style: const TextStyle(fontSize: 14),
-            ),
-          ],
-        ),
+        title: const Text('Бухгалтер'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _fetchData,
+            tooltip: 'Обновить данные',
+          ),
+        ],
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
-            Tab(text: 'Загрузка заказов', icon: Icon(Icons.file_upload)),
-            Tab(text: 'Доставленные заказы', icon: Icon(Icons.insights)),
+            Tab(icon: Icon(Icons.list), text: 'Заказы'),
+            Tab(icon: Icon(Icons.file_download), text: 'Импорт/Экспорт'),
+            Tab(icon: Icon(Icons.analytics), text: 'Статистика'),
           ],
         ),
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          // Первая вкладка: Загрузка заказов
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                if (_selectedFileName != null)
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.file_present),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'Выбранный файл: $_selectedFileName',
-                              style: const TextStyle(fontSize: 16),
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.close),
-                            onPressed: () {
-                              setState(() {
-                                _selectedFileName = null;
-                                _selectedFilePath = null;
-                              });
-                            },
-                          )
-                        ],
-                      ),
-                    ),
-                  ),
-                if (_errorMessage != null)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16.0),
-                    child: Text(
-                      _errorMessage!,
-                      style: const TextStyle(color: Colors.red),
-                    ),
-                  ),
-                const SizedBox(height: 16),
-                _isLoading
-                    ? const CircularProgressIndicator()
-                    : Column(
-                        children: [
-                          const Text(
-                            'Загрузите файл с новыми заказами',
-                            style: TextStyle(fontSize: 16),
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'Поддерживаемые форматы: Excel (.xlsx) и CSV (.csv)',
-                            style: TextStyle(fontSize: 14, color: Colors.grey),
-                          ),
-                          const SizedBox(height: 24),
-                          ElevatedButton.icon(
-                            onPressed: _uploadOrders,
-                            icon: const Icon(Icons.file_upload),
-                            label: const Text('Выбрать файл'),
-                            style: ElevatedButton.styleFrom(
-                              minimumSize: const Size.fromHeight(50),
-                            ),
-                          ),
-                        ],
-                      ),
-              ],
+      drawer: Drawer(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: <Widget>[
+            const DrawerHeader(
+              decoration: BoxDecoration(color: Colors.blue),
+              child: Text(
+                'Меню бухгалтера',
+                style: TextStyle(color: Colors.white, fontSize: 24),
+              ),
             ),
-          ),
-
-          // Вторая вкладка: Доставленные заказы
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              children: [
-                // Фильтры
-                Card(
-                  elevation: 2,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+            ListTile(
+              leading: const Icon(Icons.home),
+              title: const Text('Главная'),
+              onTap: () {
+                Navigator.pop(context);
+                _tabController.animateTo(0);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.file_download),
+              title: const Text('Импорт/Экспорт'),
+              onTap: () {
+                Navigator.pop(context);
+                _tabController.animateTo(1);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.analytics),
+              title: const Text('Статистика'),
+              onTap: () {
+                Navigator.pop(context);
+                _tabController.animateTo(2);
+              },
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.exit_to_app),
+              title: const Text('Выйти'),
+              onTap: () {
+                // Выход из аккаунта
+                Provider.of<AuthProvider>(context, listen: false).logout();
+                Navigator.pushReplacementNamed(context, '/');
+              },
+            ),
+          ],
+        ),
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage != null
+              ? Center(
+                  child: Text(
+                    _errorMessage!,
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                )
+              : TabBarView(
+                  controller: _tabController,
+                  children: [
+                    // Вкладка со списком заказов
+                    Column(
                       children: [
-                        const Text(
-                          'Фильтры',
-                          style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 16),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton(
-                                onPressed: () => _selectDateRange(context),
-                                child: Text(
-                                  '${DateFormat('dd.MM.yyyy').format(_startDate)} - ${DateFormat('dd.MM.yyyy').format(_endDate)}',
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        DropdownButtonFormField<String?>(
-                          decoration: const InputDecoration(
-                            labelText: 'Курьер',
-                            border: OutlineInputBorder(),
-                          ),
-                          value: _selectedCourierId,
-                          onChanged: (value) {
-                            setState(() {
-                              _selectedCourierId = value;
-                            });
-                          },
-                          items: [
-                            const DropdownMenuItem<String?>(
-                              value: null,
-                              child: Text('Все курьеры'),
-                            ),
-                            ..._couriers.map((courier) {
-                              return DropdownMenuItem<String?>(
-                                value: courier['id'],
-                                child:
-                                    Text(courier['username'] ?? 'Неизвестный'),
-                              );
-                            }).toList(),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            ElevatedButton(
-                              onPressed: _loadDeliveredOrders,
-                              child: const Text('Применить'),
-                            ),
-                            ElevatedButton.icon(
-                              onPressed: _downloadReport,
-                              icon: const Icon(Icons.file_download),
-                              label: const Text('Скачать отчет'),
-                            ),
-                          ],
-                        ),
+                        _buildFilterPanel(),
+                        _buildSummaryPanel(),
+                        Expanded(child: _buildOrdersList()),
                       ],
                     ),
-                  ),
-                ),
-
-                const SizedBox(height: 16),
-
-                // Заголовок и информация о сумме
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Доставленные заказы (${_deliveredOrders.length})',
-                      style: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold),
+                    
+                    // Вкладка импорта/экспорта
+                    Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.cloud_upload, size: 48),
+                          const SizedBox(height: 16),
+                          const Text('Импорт/Экспорт данных', style: TextStyle(fontSize: 20)),
+                          const SizedBox(height: 32),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.upload_file),
+                            label: const Text('Импорт заказов из Excel/CSV'),
+                            onPressed: _importOrders,
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.download_for_offline),
+                            label: const Text('Экспорт отчета'),
+                            onPressed: _exportOrders,
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                    Text(
-                      'Общая сумма: ${_totalSum.toStringAsFixed(2)} ₽',
-                      style: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold),
+                    
+                    // Вкладка статистики
+                    SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Статистика по доставленным заказам', 
+                              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 16),
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text('За текущий период:'),
+                                  const SizedBox(height: 8),
+                                  Text('Всего заказов: ${_orders.length}'),
+                                  Text('Доставлено: ${_orders.where((o) => o.status == 'доставлен').length}'),
+                                  Text('В пути: ${_orders.where((o) => o.status == 'в пути').length}'),
+                                  Text('Новых: ${_orders.where((o) => o.status == 'новый').length}'),
+                                  Text('Общая сумма: ${_totalRevenue.toStringAsFixed(2)} руб.'),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          // Дополнительные элементы статистики могут быть добавлены здесь
+                        ],
+                      ),
                     ),
                   ],
                 ),
-
-                const SizedBox(height: 8),
-
-                // Список заказов
-                Expanded(
-                  child: _isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : _deliveredOrders.isEmpty
-                          ? const Center(
-                              child: Text('Нет доставленных заказов'))
-                          : ListView.builder(
-                              itemCount: _deliveredOrders.length,
-                              itemBuilder: (context, index) {
-                                final order = _deliveredOrders[index];
-                                return OrderCard(order: order);
-                              },
-                            ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

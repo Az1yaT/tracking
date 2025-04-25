@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:tracking_application/providers/auth_provider.dart';
 import '../../services/api_service.dart';
-import '../../models/order.dart'; // Добавьте импорт модели Order
+import '../../models/order.dart';
 
 class DirectorScreen extends StatefulWidget {
   final ApiService apiService;
@@ -12,8 +14,8 @@ class DirectorScreen extends StatefulWidget {
 }
 
 class _DirectorScreenState extends State<DirectorScreen> {
-  List<Order> _orders = []; // Изменено с List<dynamic> на List<Order>
-  List<dynamic> _couriers = [];
+  List<Order> _orders = []; // Используем объекты Order вместо Map
+  List<Map<String, dynamic>> _couriers = [];
   String? _errorMessage;
   bool _isLoading = false;
 
@@ -23,24 +25,27 @@ class _DirectorScreenState extends State<DirectorScreen> {
     _fetchData();
   }
 
-  void _fetchData() async {
+  Future<void> _fetchData() async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
     try {
-      // Используем searchOrders, который возвращает List<Order>
+      // Используем searchOrders вместо get('/orders')
       final orders = await widget.apiService.searchOrders();
       final couriers = await widget.apiService.getCouriers();
-
+      
       setState(() {
         _orders = orders;
         _couriers = couriers;
+        print('Загружено заказов: ${_orders.length}');
+        print('Загружено курьеров: ${_couriers.length}');
       });
     } catch (e) {
       setState(() {
         _errorMessage = 'Ошибка загрузки данных: ${e.toString()}';
+        print('Ошибка загрузки: $e');
       });
     } finally {
       setState(() {
@@ -49,45 +54,47 @@ class _DirectorScreenState extends State<DirectorScreen> {
     }
   }
 
-  void _fetchStatistics() async {
-    try {
-      final stats = await widget.apiService.get('/statistics');
-      // TODO: Обработать и отобразить данные статистики
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Статистика успешно загружена')),
-      );
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Ошибка загрузки статистики: ${e.toString()}';
-      });
-    }
-  }
-
-  void _assignCourier(String orderId, String courierId) async {
+  Future<void> _assignCourier(String orderId, String courierId) async {
     setState(() {
       _isLoading = true;
+      _errorMessage = null;
     });
 
     try {
-      // Используем правильный эндпоинт и данные для назначения курьера
-      await widget.apiService.patch('/orders/$orderId/assign', {
-        'courierId': courierId,
-      });
-
-      // Обновляем UI после успешного назначения
-      _fetchData(); // Перезагружаем данные, чтобы отобразить изменения
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Курьер успешно назначен')),
+      print('Начинаем назначение курьера: $courierId для заказа: $orderId');
+      
+      // Вызываем метод assignCourier из apiService
+      await widget.apiService.assignCourier(orderId, courierId);
+      
+      // Находим курьера для отображения информации
+      final courier = _couriers.firstWhere(
+        (c) => c['id'] == courierId,
+        orElse: () => {'fullName': 'Неизвестно', 'username': 'Неизвестно'}
       );
+      
+      final courierName = courier['fullName'] ?? courier['username'] ?? 'Неизвестно';
+      
+      // Показываем уведомление
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Курьер ${courierName} успешно назначен на заказ №$orderId')),
+      );
+      
+      // Перезагружаем данные для отображения актуальной информации
+      _fetchData();
+      
     } catch (e) {
+      print('Ошибка при назначении курьера: $e');
       setState(() {
-        _isLoading = false;
         _errorMessage = 'Ошибка при назначении курьера: ${e.toString()}';
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Ошибка: ${e.toString()}')),
       );
+    } finally {
+      // Убираем индикатор загрузки
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
 
@@ -123,15 +130,10 @@ class _DirectorScreenState extends State<DirectorScreen> {
           padding: EdgeInsets.zero,
           children: <Widget>[
             const DrawerHeader(
-              decoration: BoxDecoration(
-                color: Colors.blue,
-              ),
+              decoration: BoxDecoration(color: Colors.blue),
               child: Text(
                 'Меню директора',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                ),
+                style: TextStyle(color: Colors.white, fontSize: 24),
               ),
             ),
             ListTile(
@@ -154,7 +156,6 @@ class _DirectorScreenState extends State<DirectorScreen> {
               title: const Text('Назначение курьеров'),
               onTap: () {
                 Navigator.pop(context);
-                Navigator.pushNamed(context, '/assign-courier');
               },
             ),
             ListTile(
@@ -170,7 +171,7 @@ class _DirectorScreenState extends State<DirectorScreen> {
               leading: const Icon(Icons.exit_to_app),
               title: const Text('Выйти'),
               onTap: () {
-                // Реализация выхода из системы
+                Provider.of<AuthProvider>(context, listen: false).logout();
                 Navigator.pushReplacementNamed(context, '/');
               },
             ),
@@ -186,42 +187,44 @@ class _DirectorScreenState extends State<DirectorScreen> {
                     style: const TextStyle(color: Colors.red),
                   ),
                 )
-              : ListView.builder(
-                  itemCount: _orders.length,
-                  itemBuilder: (context, index) {
-                    final order = _orders[index];
-                    return Card(
-                      margin: const EdgeInsets.all(8.0),
-                      child: ListTile(
-                        title: Text('Заказ №${order.id}'), // Используем свойство вместо индекса
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('Статус: ${order.status ?? "Неизвестно"}'), // Используем свойство
-                            Text('Курьер: ${order.courierName ?? "Не назначен"}'), // Используем свойство
-                            Text('Адрес: ${order.address ?? ""}'), // Используем свойство
-                          ],
-                        ),
-                        isThreeLine: true,
-                        trailing: DropdownButton<String>(
-                          hint: const Text('Назначить'),
-                          value: order.courierId, // Используем свойство
-                          onChanged: (value) {
-                            if (value != null) {
-                              _assignCourier(order.id, value); // Используем свойство
-                            }
-                          },
-                          items: _couriers.map<DropdownMenuItem<String>>((courier) {
-                            return DropdownMenuItem<String>(
-                              value: courier['id'],
-                              child: Text(courier['username'] ?? courier['name'] ?? 'Неизвестно'),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                    );
-                  },
-                ),
+              : _orders.isEmpty
+                  ? const Center(child: Text('Нет доступных заказов'))
+                  : ListView.builder(
+                      itemCount: _orders.length,
+                      itemBuilder: (context, index) {
+                        final order = _orders[index];
+                        return Card(
+                          margin: const EdgeInsets.all(8.0),
+                          child: ListTile(
+                            title: Text('Заказ №${order.id}'),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Статус: ${order.status ?? "Неизвестно"}'),
+                                Text('Курьер: ${order.courierName ?? "Не назначен"}'),
+                                Text('Адрес: ${order.address ?? ""}'),
+                              ],
+                            ),
+                            isThreeLine: true,
+                            trailing: DropdownButton<String>(
+                              hint: Text(order.courierId == null ? 'Назначить' : 'Изменить'),
+                              value: order.courierId,
+                              onChanged: (value) {
+                                if (value != null) {
+                                  _assignCourier(order.id, value);
+                                }
+                              },
+                              items: _couriers.map<DropdownMenuItem<String>>((courier) {
+                                return DropdownMenuItem<String>(
+                                  value: courier['id'],
+                                  child: Text(courier['username'] ?? courier['name'] ?? 'Неизвестно'),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
       floatingActionButton: FloatingActionButton(
         onPressed: () {
           Navigator.pushNamed(context, '/search-orders');
